@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Image Prompter</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    height: 100%;
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+  }
+
+  /* ---------- Home screen ---------- */
+  #home {
+    position: fixed;
+    inset: 0;
+    background: #111;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #homeInner {
+    width: min(560px, 92vw);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #dropzone {
+    padding: 32px;
+    border: 2px dashed #444;
+    border-radius: 16px;
+    text-align: center;
+    color: #ccc;
+    transition: border-color 0.2s, background 0.2s;
+    flex-shrink: 0;
+  }
+  #dropzone.drag {
+    border-color: #4fd1c5;
+    background: rgba(79, 209, 197, 0.06);
+  }
+  #dropzone h1 {
+    font-size: 20px;
+    font-weight: 500;
+    margin: 0 0 6px;
+    color: #fff;
+  }
+  #dropzone p {
+    font-size: 13px;
+    color: #999;
+    margin: 0 0 18px;
+  }
+  #fileInput { display: none; }
+  #chooseBtn {
+    display: inline-block;
+    padding: 10px 24px;
+    background: #4fd1c5;
+    color: #06201d;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #chooseBtn:hover { background: #6be0d5; }
+
+  #playlist {
+    background: #1a1a1a;
+    border-radius: 12px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }
+  #playlist:empty::after {
+    content: 'Playlist is empty. Add images above.';
+    display: block;
+    padding: 20px;
+    color: #666;
+    font-size: 13px;
+    text-align: center;
+  }
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #262626;
+    cursor: pointer;
+  }
+  .item:last-child { border-bottom: none; }
+  .item:hover { background: #232323; }
+  .item.active { background: #1f3733; }
+  .item img {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    flex-shrink: 0;
+    background: #000;
+  }
+  .item .name {
+    flex: 1;
+    font-size: 13px;
+    color: #ddd;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .item button {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    line-height: 1;
+  }
+  .item button:hover { background: #333; color: #fff; }
+  .item .remove:hover { color: #f87171; }
+
+  /* ---------- Viewer screen (fullscreen, no text) ---------- */
+  #viewer {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+  }
+  #viewport {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  #img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    transform: translateY(0px);
+    display: block;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="home">
+  <div id="homeInner">
+    <div id="dropzone">
+      <h1>Image Prompter</h1>
+      <p>Choose or drop images to build a playlist (F5 also adds)</p><p style="color:#4fd1c5">"Christian unity found in love."</p><p style="font-size:12px">PgUp: Down x2 | PgDn: Up x2 | ↑ Fast Down | ↓ Fast Up | Space: Start/Stop | F10 Prev | F12 Next | Esc Home<br><b>Internal use only.</b></p>
+      <label id="chooseBtn" for="fileInput">Choose images</label>
+      <input type="file" id="fileInput" accept="image/*" multiple>
+    </div>
+    <div id="playlist"></div>
+  </div>
+</div>
+
+<div id="viewer">
+  <div id="viewport">
+    <img id="img" alt="">
+  </div>
+</div>
+
+<script>
+(function () {
+  const home = document.getElementById('home');
+  const dropzone = document.getElementById('dropzone');
+  const playlistEl = document.getElementById('playlist');
+  const viewer = document.getElementById('viewer');
+  const fileInput = document.getElementById('fileInput');
+  const img = document.getElementById('img');
+  const viewport = document.getElementById('viewport');
+
+  const reverseKeys = ['q','w','e','r','t','y','u','i','o'];
+  const PX_PER_LEVEL = 0.6;
+
+  let playlist = [];      // { url, name }
+  let currentIndex = -1;
+
+  let speed = 1;          // persists across images, default 1
+  let direction = 1;      // persists across images, default forward
+  let running = false;
+  let position = 0;
+  let rafId = null;
+
+  // ---------- Playlist management ----------
+
+  function addFiles(fileList) {
+    const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+    files.forEach(function (file) {
+      playlist.push({ url: URL.createObjectURL(file), name: file.name });
+    });
+    renderPlaylist();
+  }
+
+  function renderPlaylist() {
+    playlistEl.innerHTML = '';
+    playlist.forEach(function (item, i) {
+      const row = document.createElement('div');
+      row.className = 'item' + (i === currentIndex ? ' active' : '');
+
+      const thumb = document.createElement('img');
+      thumb.src = item.url;
+      row.appendChild(thumb);
+
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = item.name;
+      row.appendChild(name);
+
+      const up = document.createElement('button');
+      up.textContent = '\u2191';
+      up.title = 'Move up';
+      up.onclick = function (e) { e.stopPropagation(); moveItem(i, -1); };
+      row.appendChild(up);
+
+      const down = document.createElement('button');
+      down.textContent = '\u2193';
+      down.title = 'Move down';
+      down.onclick = function (e) { e.stopPropagation(); moveItem(i, 1); };
+      row.appendChild(down);
+
+      const remove = document.createElement('button');
+      remove.textContent = '\u2715';
+      remove.className = 'remove';
+      remove.title = 'Remove';
+      remove.onclick = function (e) { e.stopPropagation(); removeItem(i); };
+      row.appendChild(remove);
+
+      row.onclick = function () { openIndex(i); };
+
+      playlistEl.appendChild(row);
+    });
+  }
+
+  function moveItem(i, dir) {
+    const j = i + dir;
+    if (j < 0 || j >= playlist.length) return;
+    const tmp = playlist[i];
+    playlist[i] = playlist[j];
+    playlist[j] = tmp;
+    if (currentIndex === i) currentIndex = j;
+    else if (currentIndex === j) currentIndex = i;
+    renderPlaylist();
+  }
+
+  function removeItem(i) {
+    playlist.splice(i, 1);
+    if (currentIndex === i) currentIndex = -1;
+    else if (currentIndex > i) currentIndex -= 1;
+    renderPlaylist();
+  }
+
+  // ---------- Viewer ----------
+
+  function openIndex(i) {
+    if (i < 0 || i >= playlist.length) return;
+    currentIndex = i;
+    stop();
+    position = 0;
+    img.src = playlist[i].url;
+    img.style.transform = 'translateY(0px)';
+
+    home.style.display = 'none';
+    viewer.style.display = 'block';
+    renderPlaylist();
+
+    if (document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(function () {});
+    }
+  }
+
+  function nextImage() {
+    if (!playlist.length) return;
+    const i = (currentIndex + 1) % playlist.length;
+    openIndex(i);
+  }
+
+  function prevImage() {
+    if (!playlist.length) return;
+    const i = (currentIndex - 1 + playlist.length) % playlist.length;
+    openIndex(i);
+  }
+
+  function backToHome() {
+    stop();
+    viewer.style.display = 'none';
+    home.style.display = 'flex';
+    if (document.fullscreenElement) document.exitFullscreen();
+  }
+
+  function maxScroll() {
+    const vpHeight = viewport.clientHeight;
+    const imgHeight = img.clientHeight;
+    return Math.max(0, imgHeight - vpHeight);
+  }
+
+  function setSpeed(level, dir) {
+    speed = level;
+    direction = dir;
+    if (!running) start();
+  }
+
+  function start() {
+    if (running) return;
+    if (!speed) speed = 1;
+    if (!direction) direction = 1;
+    running = true;
+    tick();
+  }
+
+  function stop() {
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
+  function tick() {
+    if (!running) return;
+    const maxPos = maxScroll();
+    position += direction * speed * PX_PER_LEVEL;
+
+    if (position <= 0) {
+      position = 0;
+      stop();
+    } else if (position >= maxPos) {
+      position = maxPos;
+      stop();
+    }
+
+    img.style.transform = 'translateY(-' + position + 'px)';
+
+    if (running) rafId = requestAnimationFrame(tick);
+  }
+
+  function toggleStartStop() {
+    if (running) {
+      stop();
+    } else {
+      start();
+    }
+  }
+
+  // ---------- Input wiring ----------
+
+  fileInput.addEventListener('change', function (e) {
+    addFiles(e.target.files);
+    fileInput.value = '';
+  });
+
+  ['dragenter', 'dragover'].forEach(function (evt) {
+    dropzone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      dropzone.classList.add('drag');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (evt) {
+    dropzone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      dropzone.classList.remove('drag');
+    });
+  });
+  dropzone.addEventListener('drop', function (e) {
+    addFiles(e.dataTransfer.files);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    const key = e.key;
+
+    // Global shortcuts, available on both home and viewer screens
+    if (key === 'F5') {
+      e.preventDefault();
+      fileInput.click();
+      return;
+    }
+    if (key === 'F10') {
+      e.preventDefault();
+      prevImage();
+      return;
+    }
+    if (key === 'F12') {
+      e.preventDefault();
+      nextImage();
+      return;
+    }
+
+    if (viewer.style.display !== 'block') return;
+
+    if (key === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) toggleStartStop();
+      return;
+    }
+
+    if (/^[1-9]$/.test(key)) {
+      setSpeed(parseInt(key, 10), 1);
+      return;
+    }
+
+    const lower = key.toLowerCase();
+    const idx = reverseKeys.indexOf(lower);
+    if (idx !== -1) {
+      setSpeed(idx + 1, -1);
+      return;
+    }
+
+
+    if (key==='PageUp'){position=Math.min(maxScroll(),position+viewport.clientHeight*2);img.style.transform='translateY(-'+position+'px)';e.preventDefault();return;}
+    if (key==='PageDown'){position=Math.max(0,position-viewport.clientHeight*2);img.style.transform='translateY(-'+position+'px)';e.preventDefault();return;}
+    if (key==='ArrowUp'){stop();position=Math.min(maxScroll(),position+80);img.style.transform='translateY(-'+position+'px)';e.preventDefault();return;}
+    if (key==='ArrowDown'){stop();position=Math.max(0,position-80);img.style.transform='translateY(-'+position+'px)';e.preventDefault();return;}
+    if (key === 'Escape') {
+      backToHome();
+    }
+  });
+
+  window.addEventListener('resize', function () {
+    const maxPos = maxScroll();
+    if (position > maxPos) position = maxPos;
+    img.style.transform = 'translateY(-' + position + 'px)';
+  });
+})();
+</script>
+
+</body>
+</html>
