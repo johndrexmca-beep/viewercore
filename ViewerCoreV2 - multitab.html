@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<script>
+  // Decide immediately (before paint) whether this window/tab is the
+  // Home (controller) or the Presentation (fullscreen output) window.
+  // This is driven purely by a URL query flag so window.open() can
+  // spawn a second tab that loads this exact same file in "present" mode.
+  (function () {
+    var isPresent = new URLSearchParams(location.search).get('present') === '1';
+    document.documentElement.classList.add(isPresent ? 'present-mode' : 'home-mode');
+  })();
+</script>
+<title>Image Prompter</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    height: 100%;
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+  }
+
+  /* ---------- Mode switch ---------- */
+  /* Home window shows #home only. Presentation window shows #viewer only. */
+  html.home-mode #viewer { display: none !important; }
+  html.present-mode #home { display: none !important; }
+  html.present-mode #viewer { display: block !important; }
+
+  /* ---------- Home screen ---------- */
+  #home {
+    position: fixed;
+    inset: 0;
+    background: #111;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #homeInner {
+    width: min(560px, 92vw);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #dropzone {
+    padding: 32px;
+    border: 2px dashed #444;
+    border-radius: 16px;
+    text-align: center;
+    color: #ccc;
+    transition: border-color 0.2s, background 0.2s;
+    flex-shrink: 0;
+  }
+  #dropzone.drag {
+    border-color: #4fd1c5;
+    background: rgba(79, 209, 197, 0.06);
+  }
+  #dropzone h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 10px;
+    color: #fff;
+    letter-spacing: 0.3px;
+  }
+  #dropzone .quote {
+    font-size: 14px;
+    color: #4fd1c5;
+    font-style: italic;
+    margin: 0 0 22px;
+  }
+  #fileInput, #listInput { display: none; }
+  #chooseBtn {
+    display: inline-block;
+    padding: 10px 24px;
+    background: #4fd1c5;
+    color: #06201d;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #chooseBtn:hover { background: #6be0d5; }
+
+  #listActions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .secondaryBtn {
+    background: #232323;
+    color: #ccc;
+    border: 1px solid #333;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .secondaryBtn:hover { background: #2c2c2c; color: #fff; }
+  .secondaryBtn:disabled { opacity: 0.4; cursor: default; }
+  .secondaryBtn:disabled:hover { background: #232323; color: #ccc; }
+
+  /* ---------- Presentation status bar (home screen) ---------- */
+  #presentBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #1a1a1a;
+    border-radius: 10px;
+    padding: 10px 12px;
+    flex-shrink: 0;
+  }
+  #presentDot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #555;
+    flex-shrink: 0;
+  }
+  #presentBar.live #presentDot {
+    background: #4fd1c5;
+    box-shadow: 0 0 0 3px rgba(79, 209, 197, 0.18);
+  }
+  #presentText {
+    flex: 1;
+    font-size: 12px;
+    color: #aaa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #presentBar.live #presentText { color: #ddd; }
+
+  #playlist {
+    background: #1a1a1a;
+    border-radius: 12px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }
+  #playlist:empty::after {
+    content: 'Playlist is empty. Add images above.';
+    display: block;
+    padding: 20px;
+    color: #666;
+    font-size: 13px;
+    text-align: center;
+  }
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #262626;
+    cursor: pointer;
+  }
+  .item:last-child { border-bottom: none; }
+  .item:hover { background: #232323; }
+  .item.active { background: #1f3733; }
+  .item img {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    flex-shrink: 0;
+    background: #000;
+  }
+  .item .name {
+    flex: 1;
+    font-size: 13px;
+    color: #ddd;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .item button {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    line-height: 1;
+  }
+  .item button:hover { background: #333; color: #fff; }
+  .item .remove:hover { color: #f87171; }
+
+  /* ---------- Hotkey guide (right side, home screen) ---------- */
+  #hotkeyPanel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #ccc;
+    font-size: 11px;
+    line-height: 1.7;
+    padding: 12px 16px;
+    border-radius: 10px;
+    z-index: 25;
+    pointer-events: none;
+    max-width: 230px;
+    white-space: nowrap;
+  }
+  #hotkeyPanel .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hotkeyPanel .k { color: #4fd1c5; font-weight: 600; }
+
+  /* ---------- Viewer screen (fullscreen, no text) ---------- */
+  #viewer {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+  }
+  #viewport {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  #img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    transform: translateY(0px);
+    display: block;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  #fsPrompt {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    color: #eee;
+    font-size: 16px;
+    z-index: 5;
+    cursor: pointer;
+    text-align: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #fsPrompt.show { display: flex; }
+  #fsPrompt span {
+    padding: 14px 22px;
+    border: 1px solid #444;
+    border-radius: 10px;
+    background: rgba(20, 20, 20, 0.7);
+  }
+  #waitingNote {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    color: #555;
+    font-size: 14px;
+    letter-spacing: 0.4px;
+  }
+  html.present-mode #viewer.empty #waitingNote { display: flex; }
+</style>
+</head>
+<body>
+
+<div id="home">
+  <div id="hotkeyPanel">
+    <div class="row"><span class="k">Click item</span><span>Present it</span></div>
+    <div class="row"><span class="k">Space</span><span>Start / Stop</span></div>
+    <div class="row"><span class="k">1-9</span><span>Speed down</span></div>
+    <div class="row"><span class="k">Q-O</span><span>Speed up (rev)</span></div>
+    <div class="row"><span class="k">PgUp</span><span>Down x2</span></div>
+    <div class="row"><span class="k">PgDn</span><span>Up x2</span></div>
+    <div class="row"><span class="k">&#8593;</span><span>Fast down</span></div>
+    <div class="row"><span class="k">&#8595;</span><span>Fast up</span></div>
+    <div class="row"><span class="k">F10</span><span>Prev image</span></div>
+    <div class="row"><span class="k">F12</span><span>Next image</span></div>
+    <div class="row"><span class="k">F5</span><span>Add images</span></div>
+    <div class="row"><span class="k">F1</span><span>Focus presentation</span></div>
+    <div class="row"><span class="k">Esc</span><span>Reset / Close</span></div>
+  </div>
+  <div id="homeInner">
+    <div id="dropzone">
+      <h1>Image Prompter</h1>
+      <p class="quote">"Christian unity found in love."</p>
+      <label id="chooseBtn" for="fileInput">Choose images</label>
+      <input type="file" id="fileInput" accept="image/*" multiple>
+      <div id="listActions">
+        <button type="button" class="secondaryBtn" id="importBtn">Import .list</button>
+        <button type="button" class="secondaryBtn" id="exportBtn">Export .list</button>
+        <button type="button" class="secondaryBtn" id="presentBtn">Open presentation tab</button>
+        <button type="button" class="secondaryBtn" id="closePresentBtn" disabled>Close presentation</button>
+      </div>
+      <input type="file" id="listInput" accept=".list">
+    </div>
+    <div id="presentBar">
+      <div id="presentDot"></div>
+      <div id="presentText">Not presenting</div>
+    </div>
+    <div id="playlist"></div>
+  </div>
+</div>
+
+<div id="viewer" class="empty">
+  <div id="viewport">
+    <img id="img" alt="">
+  </div>
+  <div id="waitingNote">Waiting for an image from the control tab&hellip;</div>
+  <div id="fsPrompt"><span>Click anywhere to enter fullscreen</span></div>
+</div>
+
+<script>
+(function () {
+  var isPresentMode = document.documentElement.classList.contains('present-mode');
+  if (isPresentMode) {
+    runPresentMode();
+  } else {
+    runHomeMode();
+  }
+
+  // =========================================================
+  //  HOME MODE — playlist, file management, remote control
+  // =========================================================
+  function runHomeMode() {
+    var home = document.getElementById('home');
+    var dropzone = document.getElementById('dropzone');
+    var playlistEl = document.getElementById('playlist');
+    var fileInput = document.getElementById('fileInput');
+    var listInput = document.getElementById('listInput');
+    var presentBar = document.getElementById('presentBar');
+    var presentText = document.getElementById('presentText');
+    var presentBtn = document.getElementById('presentBtn');
+    var closePresentBtn = document.getElementById('closePresentBtn');
+
+    var playlist = [];      // { url, name, file }
+    var currentIndex = -1;
+    var dragSrcIndex = null;
+
+    var presentWin = null;
+    var presentReady = false;
+    var pendingCbs = [];
+
+    // ---------- Playlist management ----------
+
+    function addFiles(fileList) {
+      var files = Array.prototype.slice.call(fileList).filter(function (f) {
+        return f.type.indexOf('image/') === 0;
+      });
+      files.forEach(function (file) {
+        playlist.push({ url: URL.createObjectURL(file), name: file.name, file: file });
+      });
+      renderPlaylist();
+    }
+
+    function renderPlaylist() {
+      playlistEl.innerHTML = '';
+      playlist.forEach(function (item, i) {
+        var row = document.createElement('div');
+        row.className = 'item' + (i === currentIndex ? ' active' : '');
+
+        var thumb = document.createElement('img');
+        thumb.src = item.url;
+        row.appendChild(thumb);
+
+        var name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = item.name;
+        row.appendChild(name);
+
+        var up = document.createElement('button');
+        up.textContent = '\u2191';
+        up.title = 'Move up';
+        up.onclick = function (e) { e.stopPropagation(); moveItem(i, -1); };
+        row.appendChild(up);
+
+        var down = document.createElement('button');
+        down.textContent = '\u2193';
+        down.title = 'Move down';
+        down.onclick = function (e) { e.stopPropagation(); moveItem(i, 1); };
+        row.appendChild(down);
+
+        var remove = document.createElement('button');
+        remove.textContent = '\u2715';
+        remove.className = 'remove';
+        remove.title = 'Remove';
+        remove.onclick = function (e) { e.stopPropagation(); removeItem(i); };
+        row.appendChild(remove);
+
+        row.onclick = function () { showIndex(i); };
+
+        row.draggable = true;
+        row.addEventListener('dragstart', function (e) {
+          dragSrcIndex = i;
+          row.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', String(i)); } catch (err) {}
+        });
+        row.addEventListener('dragend', function () {
+          row.classList.remove('dragging');
+        });
+        row.addEventListener('dragover', function (e) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          row.classList.add('drag-over');
+        });
+        row.addEventListener('dragleave', function () {
+          row.classList.remove('drag-over');
+        });
+        row.addEventListener('drop', function (e) {
+          e.preventDefault();
+          row.classList.remove('drag-over');
+          if (dragSrcIndex === null || dragSrcIndex === i) return;
+          reorderItem(dragSrcIndex, i);
+          dragSrcIndex = null;
+        });
+
+        playlistEl.appendChild(row);
+      });
+    }
+
+    function moveItem(i, dir) {
+      var j = i + dir;
+      if (j < 0 || j >= playlist.length) return;
+      var tmp = playlist[i];
+      playlist[i] = playlist[j];
+      playlist[j] = tmp;
+      if (currentIndex === i) currentIndex = j;
+      else if (currentIndex === j) currentIndex = i;
+      renderPlaylist();
+    }
+
+    function reorderItem(from, to) {
+      if (from === to) return;
+      var item = playlist.splice(from, 1)[0];
+      playlist.splice(to, 0, item);
+      if (currentIndex === from) {
+        currentIndex = to;
+      } else if (from < currentIndex && to >= currentIndex) {
+        currentIndex -= 1;
+      } else if (from > currentIndex && to <= currentIndex) {
+        currentIndex += 1;
+      }
+      renderPlaylist();
+    }
+
+    function removeItem(i) {
+      playlist.splice(i, 1);
+      if (currentIndex === i) currentIndex = -1;
+      else if (currentIndex > i) currentIndex -= 1;
+      renderPlaylist();
+    }
+
+    // ---------- Import / Export ----------
+
+    function exportPlaylist() {
+      if (!playlist.length) return;
+      Promise.all(playlist.map(function (p) {
+        if (p.file) {
+          return new Promise(function (resolve) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve({ name: p.name, data: reader.result }); };
+            reader.readAsDataURL(p.file);
+          });
+        }
+        return Promise.resolve({ name: p.name, data: p.url });
+      })).then(function (results) {
+        var blob = new Blob([JSON.stringify(results)], { type: 'application/json' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'playlist.list';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+    }
+
+    function importPlaylist(file) {
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        try {
+          var data = JSON.parse(e.target.result);
+          data.forEach(function (entry) {
+            playlist.push({ url: entry.data, name: entry.name, file: null });
+          });
+          renderPlaylist();
+        } catch (err) {
+          alert('Invalid .list file.');
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    // ---------- Presentation window management ----------
+
+    function presentUrl() {
+      var url = new URL(location.href);
+      url.searchParams.set('present', '1');
+      return url.toString();
+    }
+
+    function setPresentUiState(live, label) {
+      presentBar.classList.toggle('live', live);
+      presentText.textContent = label;
+      closePresentBtn.disabled = !live;
+      presentBtn.textContent = live ? 'Reopen presentation tab' : 'Open presentation tab';
+    }
+
+    function ensurePresentWindow(cb) {
+      if (presentWin && !presentWin.closed) {
+        if (presentReady) { cb(); } else { pendingCbs.push(cb); }
+        return;
+      }
+      presentReady = false;
+      pendingCbs = [cb];
+      setPresentUiState(false, 'Opening presentation tab\u2026');
+      presentWin = window.open(presentUrl(), 'ImagePrompterPresent');
+      if (!presentWin) {
+        setPresentUiState(false, 'Pop-up blocked \u2014 allow pop-ups for this page');
+        pendingCbs = [];
+      }
+    }
+
+    function postPresent(msg) {
+      if (presentWin && !presentWin.closed) {
+        presentWin.postMessage(msg, '*');
+      }
+    }
+
+    function showIndex(i) {
+      if (i < 0 || i >= playlist.length) return;
+      currentIndex = i;
+      renderPlaylist();
+      var entry = playlist[i];
+      ensurePresentWindow(function () {
+        // Blob URLs created in this tab (URL.createObjectURL) are not
+        // reliably loadable from a different tab/window, so send the
+        // actual File across (postMessage can structured-clone Files/Blobs)
+        // and let the presentation tab mint its own object URL from it.
+        if (entry.file) {
+          postPresent({ type: 'show', kind: 'file', file: entry.file, name: entry.name });
+        } else {
+          postPresent({ type: 'show', kind: 'url', url: entry.url, name: entry.name });
+        }
+        setPresentUiState(true, 'Presenting: ' + entry.name);
+      });
+    }
+
+    function nextImage() {
+      if (!playlist.length) return;
+      var i = currentIndex < 0 ? 0 : (currentIndex + 1) % playlist.length;
+      showIndex(i);
+    }
+
+    function prevImage() {
+      if (!playlist.length) return;
+      var i = currentIndex < 0 ? 0 : (currentIndex - 1 + playlist.length) % playlist.length;
+      showIndex(i);
+    }
+
+    function closePresentation() {
+      postPresent({ type: 'close' });
+      if (presentWin && !presentWin.closed) {
+        try { presentWin.close(); } catch (err) {}
+      }
+      presentWin = null;
+      presentReady = false;
+      setPresentUiState(false, 'Not presenting');
+    }
+
+    window.addEventListener('message', function (e) {
+      if (!presentWin || e.source !== presentWin) return;
+      var data = e.data || {};
+      if (data.type === 'ready') {
+        presentReady = true;
+        var cbs = pendingCbs;
+        pendingCbs = [];
+        cbs.forEach(function (fn) { fn(); });
+      } else if (data.type === 'closed') {
+        presentWin = null;
+        presentReady = false;
+        setPresentUiState(false, 'Not presenting');
+      } else if (data.type === 'requestAddImages') {
+        fileInput.click();
+      } else if (data.type === 'requestNav') {
+        if (data.dir > 0) nextImage(); else prevImage();
+      }
+    });
+
+    // ---------- Buttons ----------
+
+    presentBtn.addEventListener('click', function () {
+      if (currentIndex === -1 && playlist.length) currentIndex = 0;
+      if (currentIndex === -1) {
+        ensurePresentWindow(function () { setPresentUiState(true, 'Presenting: waiting for images'); });
+        return;
+      }
+      showIndex(currentIndex);
+    });
+    closePresentBtn.addEventListener('click', closePresentation);
+
+    fileInput.addEventListener('change', function (e) {
+      addFiles(e.target.files);
+      fileInput.value = '';
+    });
+
+    listInput.addEventListener('change', function (e) {
+      if (e.target.files && e.target.files[0]) {
+        importPlaylist(e.target.files[0]);
+      }
+      listInput.value = '';
+    });
+
+    document.getElementById('importBtn').addEventListener('click', function () {
+      listInput.click();
+    });
+    document.getElementById('exportBtn').addEventListener('click', exportPlaylist);
+
+    ['dragenter', 'dragover'].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.add('drag');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.remove('drag');
+      });
+    });
+    dropzone.addEventListener('drop', function (e) {
+      addFiles(e.dataTransfer.files);
+    });
+
+    // ---------- Keyboard: home tab drives the presentation tab ----------
+
+    var reverseKeys = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o'];
+
+    document.addEventListener('keydown', function (e) {
+      var key = e.key;
+
+      if (key === 'F5') {
+        e.preventDefault();
+        fileInput.click();
+        return;
+      }
+      if (key === 'F10') {
+        e.preventDefault();
+        prevImage();
+        return;
+      }
+      if (key === 'F12') {
+        e.preventDefault();
+        nextImage();
+        return;
+      }
+      if (key === 'F1') {
+        e.preventDefault();
+        if (presentWin && !presentWin.closed) {
+          try { presentWin.focus(); } catch (err) {}
+        }
+        return;
+      }
+
+      if (!presentWin || presentWin.closed) return;
+
+      if (key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        if (!e.repeat) postPresent({ type: 'command', action: 'toggleStartStop' });
+        return;
+      }
+
+      if (/^[1-9]$/.test(key)) {
+        postPresent({ type: 'command', action: 'setSpeed', level: parseInt(key, 10), dir: 1 });
+        return;
+      }
+
+      var lower = key.toLowerCase();
+      var idx = reverseKeys.indexOf(lower);
+      if (idx !== -1) {
+        postPresent({ type: 'command', action: 'setSpeed', level: idx + 1, dir: -1 });
+        return;
+      }
+
+      if (key === 'PageUp') { e.preventDefault(); postPresent({ type: 'command', action: 'pageForward' }); return; }
+      if (key === 'PageDown') { e.preventDefault(); postPresent({ type: 'command', action: 'pageBackward' }); return; }
+      if (key === 'ArrowUp') { e.preventDefault(); postPresent({ type: 'command', action: 'stepForward' }); return; }
+      if (key === 'ArrowDown') { e.preventDefault(); postPresent({ type: 'command', action: 'stepBackward' }); return; }
+      if (key === 'Escape') { postPresent({ type: 'command', action: 'escape' }); return; }
+    });
+
+    setPresentUiState(false, 'Not presenting');
+  }
+
+  // =========================================================
+  //  PRESENT MODE — fullscreen output, remote-controlled
+  // =========================================================
+  function runPresentMode() {
+    var viewer = document.getElementById('viewer');
+    var viewport = document.getElementById('viewport');
+    var img = document.getElementById('img');
+    var fsPrompt = document.getElementById('fsPrompt');
+
+    var PX_PER_LEVEL = 0.6;
+    var speed = 1;
+    var direction = 1;
+    var running = false;
+    var position = 0;
+    var rafId = null;
+    var currentObjectUrl = null;
+
+    function maxScroll() {
+      var vpHeight = viewport.clientHeight;
+      var imgHeight = img.clientHeight;
+      return Math.max(0, imgHeight - vpHeight);
+    }
+
+    function applyTransform() {
+      img.style.transform = 'translateY(-' + position + 'px)';
+    }
+
+    function start() {
+      if (running) return;
+      if (!speed) speed = 1;
+      if (!direction) direction = 1;
+      running = true;
+      tick();
+    }
+
+    function stop() {
+      running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+
+    function tick() {
+      if (!running) return;
+      var maxPos = maxScroll();
+      position += direction * speed * PX_PER_LEVEL;
+
+      if (position <= 0) {
+        position = 0;
+        stop();
+      } else if (position >= maxPos) {
+        position = maxPos;
+        stop();
+      }
+
+      applyTransform();
+      if (running) rafId = requestAnimationFrame(tick);
+    }
+
+    function toggleStartStop() {
+      if (running) stop(); else start();
+    }
+
+    function showImage(url) {
+      viewer.classList.remove('empty');
+      stop();
+      position = 0;
+      img.src = url;
+      applyTransform();
+    }
+
+    function showFile(file) {
+      // Create our own object URL in *this* document so it's always
+      // resolvable here, then release the previous one.
+      var url = URL.createObjectURL(file);
+      var prev = currentObjectUrl;
+      currentObjectUrl = url;
+      showImage(url);
+      if (prev) URL.revokeObjectURL(prev);
+    }
+
+    function closeSelf() {
+      stop();
+      try {
+        if (window.opener) window.opener.postMessage({ type: 'closed' }, '*');
+      } catch (err) {}
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(function () {});
+      }
+      window.close();
+    }
+
+    // ---------- Fullscreen handling ----------
+
+    function tryFullscreen() {
+      if (document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().then(function () {
+          fsPrompt.classList.remove('show');
+        }).catch(function () {
+          fsPrompt.classList.add('show');
+        });
+      }
+    }
+
+    document.addEventListener('fullscreenchange', function () {
+      if (document.fullscreenElement) fsPrompt.classList.remove('show');
+    });
+
+    fsPrompt.addEventListener('click', tryFullscreen);
+    tryFullscreen();
+    // Fullscreen requests triggered outside a direct user gesture are
+    // often blocked by the browser; if that happens the click prompt
+    // above lets the presentation tab enter fullscreen with one click.
+
+    // ---------- Messages from the home (control) tab ----------
+
+    window.addEventListener('message', function (e) {
+      if (window.opener && e.source !== window.opener) return;
+      var data = e.data || {};
+
+      if (data.type === 'show') {
+        if (data.kind === 'file' && data.file) {
+          showFile(data.file);
+        } else {
+          showImage(data.url);
+        }
+      } else if (data.type === 'close') {
+        closeSelf();
+      } else if (data.type === 'command') {
+        switch (data.action) {
+          case 'toggleStartStop':
+            toggleStartStop();
+            break;
+          case 'setSpeed':
+            speed = data.level;
+            direction = data.dir;
+            break;
+          case 'pageForward':
+            position = Math.min(maxScroll(), position + viewport.clientHeight * 2);
+            applyTransform();
+            break;
+          case 'pageBackward':
+            position = Math.max(0, position - viewport.clientHeight * 2);
+            applyTransform();
+            break;
+          case 'stepForward':
+            stop();
+            position = Math.min(maxScroll(), position + 80);
+            applyTransform();
+            break;
+          case 'stepBackward':
+            stop();
+            position = Math.max(0, position - 80);
+            applyTransform();
+            break;
+          case 'escape':
+            if (position > 0) {
+              stop();
+              position = 0;
+              applyTransform();
+            } else {
+              closeSelf();
+            }
+            break;
+        }
+      }
+    });
+
+    // ---------- Local keyboard (works if this tab has focus) ----------
+
+    var reverseKeys = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o'];
+
+    document.addEventListener('keydown', function (e) {
+      var key = e.key;
+
+      if (key === 'F5') {
+        e.preventDefault();
+        try { window.opener && window.opener.postMessage({ type: 'requestAddImages' }, '*'); } catch (err) {}
+        return;
+      }
+      if (key === 'F10') {
+        e.preventDefault();
+        try { window.opener && window.opener.postMessage({ type: 'requestNav', dir: -1 }, '*'); } catch (err) {}
+        return;
+      }
+      if (key === 'F12') {
+        e.preventDefault();
+        try { window.opener && window.opener.postMessage({ type: 'requestNav', dir: 1 }, '*'); } catch (err) {}
+        return;
+      }
+
+      if (key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        if (!e.repeat) toggleStartStop();
+        return;
+      }
+
+      if (/^[1-9]$/.test(key)) {
+        speed = parseInt(key, 10);
+        direction = 1;
+        return;
+      }
+
+      var lower = key.toLowerCase();
+      var idx = reverseKeys.indexOf(lower);
+      if (idx !== -1) {
+        speed = idx + 1;
+        direction = -1;
+        return;
+      }
+
+      if (key === 'PageUp') { position = Math.min(maxScroll(), position + viewport.clientHeight * 2); applyTransform(); e.preventDefault(); return; }
+      if (key === 'PageDown') { position = Math.max(0, position - viewport.clientHeight * 2); applyTransform(); e.preventDefault(); return; }
+      if (key === 'ArrowUp') { stop(); position = Math.min(maxScroll(), position + 80); applyTransform(); e.preventDefault(); return; }
+      if (key === 'ArrowDown') { stop(); position = Math.max(0, position - 80); applyTransform(); e.preventDefault(); return; }
+      if (key === 'Escape') {
+        if (position > 0) {
+          stop();
+          position = 0;
+          applyTransform();
+        } else {
+          closeSelf();
+        }
+      }
+    });
+
+    window.addEventListener('resize', function () {
+      var maxPos = maxScroll();
+      if (position > maxPos) position = maxPos;
+      applyTransform();
+    });
+
+    window.addEventListener('beforeunload', function () {
+      try { if (window.opener) window.opener.postMessage({ type: 'closed' }, '*'); } catch (err) {}
+    });
+
+    // Tell the opener (home tab) we're up and ready to receive images.
+    try {
+      if (window.opener) window.opener.postMessage({ type: 'ready' }, '*');
+    } catch (err) {}
+  }
+})();
+</script>
+
+</body>
+</html>
